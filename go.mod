@@ -9,6 +9,7 @@ require (
 	github.com/ebitengine/oto/v3 v3.5.1
 	github.com/egoist/mygo v0.5.1
 	github.com/go-macos/objc v0.10.2
+	github.com/go-ole/go-ole v1.3.0
 	github.com/godbus/dbus/v5 v5.2.2
 	golang.org/x/image v0.46.0
 	golang.org/x/sys v0.48.0

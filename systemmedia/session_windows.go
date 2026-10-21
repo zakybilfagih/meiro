@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"unsafe"
 
+	"github.com/go-ole/go-ole"
 	"golang.org/x/image/vector"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -30,7 +31,6 @@ import (
 
 var (
 	user32   = windows.NewLazySystemDLL("user32.dll")
-	ole32    = windows.NewLazySystemDLL("ole32.dll")
 	comctl32 = windows.NewLazySystemDLL("comctl32.dll")
 
 	procRegisterWindowMessageW      = user32.NewProc("RegisterWindowMessageW")
@@ -39,17 +39,16 @@ var (
 	procGetSystemMetrics            = user32.NewProc("GetSystemMetrics")
 	procIsWindow                    = user32.NewProc("IsWindow")
 	procChangeWindowMessageFilterEx = user32.NewProc("ChangeWindowMessageFilterEx")
-	procCoCreateInstance            = ole32.NewProc("CoCreateInstance")
 	procSetWindowSubclass           = comctl32.NewProc("SetWindowSubclass")
 	procRemoveWindowSubclass        = comctl32.NewProc("RemoveWindowSubclass")
 	procDefSubclassProc             = comctl32.NewProc("DefSubclassProc")
 
-	clsidTaskbarList = windows.GUID{Data1: 0x56fdf344, Data2: 0xfd6d, Data3: 0x11d0, Data4: [8]byte{0x95, 0x8a, 0x00, 0x60, 0x97, 0xc9, 0xa0, 0x90}}
+	clsidTaskbarList = ole.NewGUID("{56FDF344-FD6D-11D0-958A-006097C9A090}")
 	// ITaskbarList4 rather than ITaskbarList3, which it extends with the
 	// thumbnail toolbar's methods in the same places: Windows 10 22H2 has
 	// been seen to answer E_NOINTERFACE to the ITaskbarList3 ID while it
 	// answers to this one.
-	iidITaskbarList4 = windows.GUID{Data1: 0xc43dc798, Data2: 0x95d1, Data3: 0x4bea, Data4: [8]byte{0x90, 0x30, 0xbb, 0x99, 0xe2, 0x98, 0x3a, 0x1a}}
+	iidITaskbarList4 = ole.NewGUID("{C43DC798-95D1-4BEA-9030-BB99E2983A1A}")
 )
 
 const (
@@ -57,7 +56,6 @@ const (
 	wmSettingChange = 0x001A
 	wmNCDestroy     = 0x0082
 	thbnClicked     = 0x1800
-	clsctxInproc    = 0x1
 	smCxSmIcon      = 49
 	subclassID      = 0x4d45_4952 // "MEIR"
 	msgfltAllow     = 1
@@ -70,16 +68,16 @@ const (
 	thbfDisabled = 0x1
 )
 
-// taskbarList is an ITaskbarList4: what COM hands back is a pointer to a
-// pointer to its table of methods.
-type taskbarList struct{ vtbl *taskbarListVtbl }
+// taskbarList is an ITaskbarList4. go-ole's IUnknown is its first three
+// methods, Release among them.
+type taskbarList struct{ ole.IUnknown }
 
 // taskbarListVtbl is the start of ITaskbarList4's method table, in the
 // order ShObjIdl_core.h declares the interfaces it extends: IUnknown,
 // ITaskbarList, ITaskbarList2, then ITaskbarList3, which ends with the
 // thumbnail toolbar's methods. ITaskbarList4 only adds one after them.
 type taskbarListVtbl struct {
-	QueryInterface, AddRef, Release                       uintptr
+	ole.IUnknownVtbl
 	HrInit, AddTab, DeleteTab, ActivateTab, SetActiveAlt  uintptr
 	MarkFullscreenWindow                                  uintptr
 	SetProgressValue, SetProgressState                    uintptr
@@ -87,24 +85,25 @@ type taskbarListVtbl struct {
 	ThumbBarAddButtons, ThumbBarUpdateButtons             uintptr
 }
 
+func (t *taskbarList) vtbl() *taskbarListVtbl { return (*taskbarListVtbl)(unsafe.Pointer(t.RawVTable)) }
+
 // call calls one of t's methods, which take t itself first.
 func (t *taskbarList) call(method uintptr, args ...uintptr) error {
 	hr, _, _ := syscall.SyscallN(method, append([]uintptr{uintptr(unsafe.Pointer(t))}, args...)...)
 	if int32(uint32(hr)) < 0 {
-		return fmt.Errorf("HRESULT %#08x", uint32(hr))
+		return ole.NewError(hr)
 	}
 	return nil
 }
 
-func (t *taskbarList) HrInit() error { return t.call(t.vtbl.HrInit) }
-func (t *taskbarList) Release()      { _ = t.call(t.vtbl.Release) }
+func (t *taskbarList) HrInit() error { return t.call(t.vtbl().HrInit) }
 
 func (t *taskbarList) ThumbBarAddButtons(hwnd uintptr, buttons []thumbButton) error {
-	return t.call(t.vtbl.ThumbBarAddButtons, hwnd, uintptr(len(buttons)), uintptr(unsafe.Pointer(&buttons[0])))
+	return t.call(t.vtbl().ThumbBarAddButtons, hwnd, uintptr(len(buttons)), uintptr(unsafe.Pointer(&buttons[0])))
 }
 
 func (t *taskbarList) ThumbBarUpdateButtons(hwnd uintptr, buttons []thumbButton) error {
-	return t.call(t.vtbl.ThumbBarUpdateButtons, hwnd, uintptr(len(buttons)), uintptr(unsafe.Pointer(&buttons[0])))
+	return t.call(t.vtbl().ThumbBarUpdateButtons, hwnd, uintptr(len(buttons)), uintptr(unsafe.Pointer(&buttons[0])))
 }
 
 // thumbButton is THUMBBUTTON, laid out as on 64-bit Windows.
@@ -183,12 +182,11 @@ func New(controls Controls) (Session, error) {
 		r, _, _ := procRegisterWindowMessageW.Call(uintptr(unsafe.Pointer(name)))
 		taskbarButtonCreated = uint32(r)
 	})
-	var taskbar *taskbarList
-	hr, _, _ := procCoCreateInstance.Call(uintptr(unsafe.Pointer(&clsidTaskbarList)), 0, clsctxInproc,
-		uintptr(unsafe.Pointer(&iidITaskbarList4)), uintptr(unsafe.Pointer(&taskbar)))
-	if int32(uint32(hr)) < 0 || taskbar == nil {
-		return nil, fmt.Errorf("create the taskbar list: HRESULT %#08x", uint32(hr))
+	unknown, err := ole.CreateInstance(clsidTaskbarList, iidITaskbarList4)
+	if err != nil {
+		return nil, fmt.Errorf("create the taskbar list: %w", err)
 	}
+	taskbar := (*taskbarList)(unsafe.Pointer(unknown))
 	if err := taskbar.HrInit(); err != nil {
 		taskbar.Release()
 		return nil, fmt.Errorf("start the taskbar list: %w", err)

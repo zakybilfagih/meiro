@@ -32,11 +32,13 @@ go_library(
         "//conditions:default": [],
     }) + select({
         "@rules_go//go/platform:windows_amd64": [
+            "@com_github_go_ole_go_ole//:go-ole",
             "@org_golang_x_image//vector",
             "@org_golang_x_sys//windows",
             "@org_golang_x_sys//windows/registry",
         ],
         "@rules_go//go/platform:windows_arm64": [
+            "@com_github_go_ole_go_ole//:go-ole",
             "@org_golang_x_image//vector",
             "@org_golang_x_sys//windows",
             "@org_golang_x_sys//windows/registry",
