@@ -720,6 +720,11 @@ func (p *Player) resolveFFmpeg() (string, error) {
 // supportsRanges reports whether the ffmpeg at path has the HTTP option
 // request_size, which older builds lack. Those refuse a command line
 // that names it, so it is only passed to an ffmpeg that lists it.
+//
+// The probe runs once per process and its answer is kept, so it has its
+// own context rather than one caller's, whose cancellation would stick.
+//
+//nolint:contextcheck,nolintlint // contextcheck reads this to stop at the probe; golangci-lint itself sees no issue here
 func supportsRanges(path string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
